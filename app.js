@@ -186,7 +186,9 @@ function renderMobileCards(sheet,range,query,anchors,covered,scrollToEnd=false){
   for(let r=headerRow+1;r<=range.e.r;r++){
     if(ws['!rows']?.[r]?.hidden)continue;
     if(isRoute){const routeCell=ws[XLSX.utils.encode_cell({r,c:range.s.c})];const routeValue=String(routeCell?.w??routeCell?.v??'').trim();const routeMerge=anchors.get(`${r},${range.s.c}`);if(routeMerge&&routeMerge.e.c>=range.s.c+1&&formatDateText(routeValue)!==routeValue){currentGroup=formatDateText(routeValue);const routeStyleId=cellStyleIds.get(sheet.name)?.get(XLSX.utils.encode_cell({r,c:range.s.c}))??0;currentGroupStyle=groupHeadingStyle(styleDefinitions[routeStyleId]||{});continue}}
-    if(groupColumn!==null){const rawGroup=effectiveCellValue(ws,r,groupColumn,anchors,covered,headerRow);if(rawGroup){const normalized=groupColumn===0&&sheet.name!=='ΠΑΡΑΓΓΕΛΙΕΣ'?formatDateText(rawGroup):rawGroup;if(normalized!==activeGroup){activeGroup=normalized;currentGroup=normalized;currentGroupStyle=''}}}
+    if(['ΠΡΟΣ ΣΥΝΕΡΓΕΙΑ','ΠΡΑΚΤΟΡΕΙΑ-ΠΕΛΑΤΕΣ-ΣΥΝΕΡΓΑΤΕΣ'].includes(sheet.name)){const dateValue=effectiveCellValue(ws,r,0,anchors,covered,headerRow,true);if(!isValidDateValue(dateValue))continue}
+    if(groupColumn!==null){const rawGroup=effectiveCellValue(ws,r,groupColumn,anchors,covered,headerRow,groupColumn===0);if(rawGroup){const normalized=groupColumn===0&&sheet.name!=='ΠΑΡΑΓΓΕΛΙΕΣ'?formatDateText(rawGroup):rawGroup;if(normalized!==activeGroup){activeGroup=normalized;currentGroup=normalized;currentGroupStyle=''}}}
+    const routeHasData=isRoute&&Array.from({length:range.e.c-range.s.c+1},(_,offset)=>effectiveCellValue(ws,r,range.s.c+offset,anchors,covered,headerRow)).some(Boolean);
     const fields=[];let rowText='';let recordTitle='';const seen=new Set();
     for(let c=range.s.c;c<=range.e.c;c++){
       let sourceRow=r,sourceCol=c;const keyHere=`${r},${c}`;
@@ -197,7 +199,7 @@ function renderMobileCards(sheet,range,query,anchors,covered,scrollToEnd=false){
         seen.add(`${sourceRow},${sourceCol}`);
       }
       const address=XLSX.utils.encode_cell({r:sourceRow,c:sourceCol});const cell=ws[address]||{};
-      const rawValue=dirty.get(`${sheet.name}!${address}`)?.value??cell.w??cell.v??'';const value=formatCellValue(cell,rawValue,headerForColumn(ws,headerRow,c));if(!String(value).trim())continue;
+      const rawValue=dirty.get(`${sheet.name}!${address}`)?.value??cell.w??cell.v??'';const forceDateColumn=c===0&&['ΠΡΑΚΤΟΡΕΙΑ-ΠΕΛΑΤΕΣ-ΣΥΝΕΡΓΑΤΕΣ','ΠΡΟΣ ΣΥΝΕΡΓΕΙΑ','ΑΠΟ ΣΥΝΕΡΓΕΙΑ'].includes(sheet.name);const value=formatCellValue(cell,rawValue,headerForColumn(ws,headerRow,c),forceDateColumn);if(!String(value).trim()&&!(isRoute&&c===2&&routeHasData))continue;
       const headerCell=ws[XLSX.utils.encode_cell({r:headerRow,c})];
       const header=String(headerCell?.w??headerCell?.v??'').trim()||XLSX.utils.encode_col(c);
       if(!recordTitle)recordTitle=value;
@@ -218,8 +220,9 @@ function renderMobileCards(sheet,range,query,anchors,covered,scrollToEnd=false){
 }
 function headerForColumn(ws,row,col){const cell=ws[XLSX.utils.encode_cell({r:row,c:col})];return String(cell?.w??cell?.v??'')}
 function groupHeadingStyle(style){const css=[];if(style.font?.color)css.push(`color:${style.font.color}`);else css.push('color:#c62828');css.push('font-weight:800');if(style.font?.size)css.push(`font-size:${Math.max(10,Math.min(22,style.font.size))}pt`);return css.join(';')}
-function effectiveCellValue(ws,row,col,anchors,covered,headerRow){let r=row,c=col;if(covered.has(`${row},${col}`)){const merge=mergesForCell(anchors,row,col);if(merge){r=merge.s.r;c=merge.s.c}}const cell=ws[XLSX.utils.encode_cell({r,c})];return String(formatCellValue(cell,cell?.v??cell?.w??'',headerForColumn(ws,headerRow,col))).trim()}
-function formatCellValue(cell,raw,header=''){if(raw==null||raw==='')return '';const isDate=XLSX.SSF?.is_date?.(cell?.z)||/ΗΜΕΡΟΜΗΝΙΑ|ΠΑΡΑΔΟΣΗ|ΟΛΟΚΛΗΡΩΣΗ/i.test(header);if(isDate&&typeof cell?.v==='number'&&(typeof raw==='number'||raw===cell.w||raw===cell.v)){const date=XLSX.SSF.parse_date_code(cell.v);if(date?.y&&date?.m&&date?.d)return`${String(date.d).padStart(2,'0')}/${String(date.m).padStart(2,'0')}/${date.y}`;}return formatDateText(String(raw))}
+function effectiveCellValue(ws,row,col,anchors,covered,headerRow,forceDate=false){let r=row,c=col;if(covered.has(`${row},${col}`)){const merge=mergesForCell(anchors,row,col);if(merge){r=merge.s.r;c=merge.s.c}}const cell=ws[XLSX.utils.encode_cell({r,c})];return String(formatCellValue(cell,cell?.v??cell?.w??'',headerForColumn(ws,headerRow,col),forceDate)).trim()}
+function isValidDateValue(value){const match=String(value).trim().match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/);if(!match)return false;const day=Number(match[1]),month=Number(match[2]),year=Number(match[3].length===2?`20${match[3]}`:match[3]);const date=new Date(Date.UTC(year,month-1,day));return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day}
+function formatCellValue(cell,raw,header='',forceDate=false){if(raw==null||raw==='')return '';const isDate=forceDate||XLSX.SSF?.is_date?.(cell?.z)||/ΗΜΕΡΟΜΗΝΙΑ|ΠΑΡΑΔΟΣΗ|ΟΛΟΚΛΗΡΩΣΗ/i.test(header);if(isDate&&typeof cell?.v==='number'&&(typeof raw==='number'||raw===cell.w||raw===cell.v)){const date=XLSX.SSF.parse_date_code(cell.v);if(date?.y&&date?.m&&date?.d)return`${String(date.d).padStart(2,'0')}/${String(date.m).padStart(2,'0')}/${date.y}`;}return formatDateText(String(raw))}
 function formatDateText(value){return String(value).replace(/(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})(?!\d)/g,(_,day,month,year)=>`${day.padStart(2,'0')}/${month.padStart(2,'0')}/${year.length===2?`20${year}`:year}`)}
 function mergesForCell(anchors,r,c){for(const merge of anchors.values())if(r>=merge.s.r&&r<=merge.e.r&&c>=merge.s.c&&c<=merge.e.c)return merge;return null}
 function bindEditedCells(){area.querySelectorAll('[contenteditable="true"]').forEach(cell=>cell.addEventListener('input',()=>{const key=`${cell.dataset.sheet}!${cell.dataset.address}`;dirty.set(key,{sheet:cell.dataset.sheet,address:cell.dataset.address,value:cell.textContent,header:cell.dataset.header});cell.classList.add('changed');saveButton.disabled=false}))}
