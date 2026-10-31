@@ -105,7 +105,7 @@ async function loadBytes(bytes,name){
   document.getElementById('status').textContent=remoteFile?'Συνδεδεμένο με OneDrive':'Αρχείο φορτώθηκε';
   document.querySelector('.dot').style.background='#38a16c';
   document.getElementById('sheetCount').textContent=`${sheets.length} ${sheets.length===1?'φύλλο':'φύλλα'}`;
-  search.hidden=false;renderTabs();showSheet(0);renderControls();
+  search.hidden=false;renderTabs();showSheet(0,true);renderControls();
 }
 function findFormulaCells(sheet){const result=new Set();for(const [address,cell] of Object.entries(sheet)){if(address[0]==='!')continue;if(cell?.f)result.add(address)}return result}
 async function readPresentation(bytes,workbook){
@@ -142,15 +142,15 @@ function styleCss(style){
 }
 function excelBorder(edge){if(!edge?.style)return'';const map={hair:'1px solid',thin:'1px solid',dotted:'1px dotted',dashed:'1px dashed',dashDot:'1px dashed',dashDotDot:'1px dashed',medium:'2px solid',mediumDashed:'2px dashed',mediumDashDot:'2px dashed',mediumDashDotDot:'2px dashed',thick:'3px solid',double:'3px double'};const result=map[edge.style];return result?`${result}${edge.color?` ${edge.color}`:''}`:''}
 function hyperlinkMarkup(link,text){const target=String(link.Target||'').trim();if(!/^https?:\/\/|^mailto:/i.test(target))return esc(text);return`<a href="${esc(target)}" rel="noopener noreferrer" target="_blank"${link.Tooltip?` title="${esc(link.Tooltip)}"`:''}>${esc(text)}</a>`}
-function renderTabs(){tabs.innerHTML='<div class="sidehead">Φύλλα εργασίας</div>'+sheets.map((sheet,index)=>`<button class="cat ${index===active?'active':''}" data-i="${index}" title="${esc(descriptions[sheet.name]||sheet.name)}"><span class="mini">▤</span>${esc(sheet.name)}<span class="badge">${Math.max(0,sheet.rows.length-1)}</span></button>`).join('');tabs.querySelectorAll('.cat').forEach(button=>button.onclick=()=>showSheet(+button.dataset.i))}
-function showSheet(index){
+function renderTabs(){tabs.innerHTML='<div class="sidehead">Φύλλα εργασίας</div>'+sheets.map((sheet,index)=>`<button class="cat ${index===active?'active':''}" data-i="${index}" title="${esc(descriptions[sheet.name]||sheet.name)}"><span class="mini">▤</span>${esc(sheet.name)}<span class="badge">${Math.max(0,sheet.rows.length-1)}</span></button>`).join('');tabs.querySelectorAll('.cat').forEach(button=>button.onclick=()=>showSheet(+button.dataset.i,true))}
+function showSheet(index,scrollToEnd=false){
   active=index;renderTabs();const sheet=sheets[index];if(!sheet)return;title.textContent=sheet.name;
   const ws=sheet.worksheet;const ref=ws['!ref']||'A1:A1';const range=XLSX.utils.decode_range(ref);const query=search.value.trim().toLocaleLowerCase('el');
   const merges=ws['!merges']||[];const anchors=new Map();const covered=new Set();
   for(const merge of merges){anchors.set(`${merge.s.r},${merge.s.c}`,merge);for(let r=merge.s.r;r<=merge.e.r;r++)for(let c=merge.s.c;c<=merge.e.c;c++)if(r!==merge.s.r||c!==merge.s.c)covered.add(`${r},${c}`)}
   const mobile=window.matchMedia('(max-width:740px)').matches;
   layoutToggle.hidden=!mobile;layoutToggle.textContent=mobileCards?'▦ Προβολή Excel':'▤ Κάρτες';
-  if(mobile&&mobileCards){renderMobileCards(sheet,range,query,anchors,covered);return}
+  if(mobile&&mobileCards){renderMobileCards(sheet,range,query,anchors,covered,scrollToEnd);return}
   const rowHasMatch=new Set();
   if(query)for(let r=range.s.r;r<=range.e.r;r++)for(let c=range.s.c;c<=range.e.c;c++){const cell=ws[XLSX.utils.encode_cell({r,c})];if(String(cell?.w??cell?.v??'').toLocaleLowerCase('el').includes(query))rowHasMatch.add(r)}
   const colNodes=[];for(let c=range.s.c;c<=range.e.c;c++){const column=ws['!cols']?.[c];const width=column?.wpx|| (column?.wch?column.wch*7+5:112);colNodes.push(`<col style="width:${Math.max(28,Math.min(500,width))}px">`)}
@@ -163,7 +163,7 @@ function showSheet(index){
       if(covered.has(`${r},${c}`))continue;
       const address=XLSX.utils.encode_cell({r,c});const key=`${sheet.name}!${address}`;const cell=ws[address]||{};const merge=anchors.get(`${r},${c}`);const span=merge?` colspan="${merge.e.c-merge.s.c+1}" rowspan="${merge.e.r-merge.s.r+1}"`:'';
       const styleId=cellStyleIds.get(sheet.name)?.get(address)??0;const style=styleDefinitions[styleId]||styleDefinitions[0]||{};const locked=sheet.formulaCells.has(address);const editable=editMode&&!locked;const changed=dirty.has(key);
-      const raw=dirty.get(key)?.value??cell.w??cell.v??'';const display=String(raw);const headerCell=ws[XLSX.utils.encode_cell({r:range.s.r,c})];const header=String(headerCell?.w??headerCell?.v??'');
+      const raw=dirty.get(key)?.value??cell.w??cell.v??'';const headerCell=ws[XLSX.utils.encode_cell({r:range.s.r,c})];const header=String(headerCell?.w??headerCell?.v??'');const display=formatCellValue(cell,raw,header);
       const valueMarkup=cell.l?.Target?hyperlinkMarkup(cell.l,display):esc(display);
       const hit=query&&rowHasMatch.has(r)?' search-match':'';
       const titleText=locked?'Τύπος Excel — δεν επεξεργάζεται από την εφαρμογή':cell.l?.Tooltip|| (editable?'Πάτησε για επεξεργασία':'');
@@ -176,11 +176,17 @@ function showSheet(index){
   area.querySelectorAll('[contenteditable="true"]').forEach(cell=>cell.addEventListener('input',()=>{const key=`${cell.dataset.sheet}!${cell.dataset.address}`;dirty.set(key,{sheet:cell.dataset.sheet,address:cell.dataset.address,value:cell.textContent,header:cell.dataset.header});cell.classList.add('changed');saveButton.disabled=false}));
   area.querySelectorAll('a').forEach(link=>link.addEventListener('click',event=>{if(editMode)event.preventDefault()}));
   if(query&&rowHasMatch.size)area.querySelector('.search-match')?.scrollIntoView({block:'nearest',inline:'nearest'});
+  else if(scrollToEnd)requestAnimationFrame(()=>area.lastElementChild?.scrollIntoView({block:'end'}));
 }
-function renderMobileCards(sheet,range,query,anchors,covered){
-  const ws=sheet.worksheet;const headerRow=range.s.r;const records=[];
+function renderMobileCards(sheet,range,query,anchors,covered,scrollToEnd=false){
+  const ws=sheet.worksheet;const headerRow=range.s.r;const records=[];let currentGroup='';let currentGroupStyle='';let activeGroup='';
+  const groupColumn=sheet.name==='ΠΑΡΑΓΓΕΛΙΕΣ'?1:['ΠΡΑΚΤΟΡΕΙΑ-ΠΕΛΑΤΕΣ-ΣΥΝΕΡΓΑΤΕΣ','ΠΡΟΣ ΣΥΝΕΡΓΕΙΑ','ΑΠΟ ΣΥΝΕΡΓΕΙΑ'].includes(sheet.name)?0:null;
+  const isRoute=sheet.name==='ΔΡΟΜΟΛΟΓΙΟ';
+  if(isRoute){const routeCell=ws[XLSX.utils.encode_cell({r:headerRow,c:range.s.c})];const routeValue=String(routeCell?.w??routeCell?.v??'').trim();const routeMerge=anchors.get(`${headerRow},${range.s.c}`);if(routeMerge&&routeMerge.e.c>=range.s.c+1&&formatDateText(routeValue)!==routeValue){currentGroup=formatDateText(routeValue);const styleId=cellStyleIds.get(sheet.name)?.get(XLSX.utils.encode_cell({r:headerRow,c:range.s.c}))??0;currentGroupStyle=groupHeadingStyle(styleDefinitions[styleId]||{});activeGroup=currentGroup}}
   for(let r=headerRow+1;r<=range.e.r;r++){
     if(ws['!rows']?.[r]?.hidden)continue;
+    if(isRoute){const routeCell=ws[XLSX.utils.encode_cell({r,c:range.s.c})];const routeValue=String(routeCell?.w??routeCell?.v??'').trim();const routeMerge=anchors.get(`${r},${range.s.c}`);if(routeMerge&&routeMerge.e.c>=range.s.c+1&&formatDateText(routeValue)!==routeValue){currentGroup=formatDateText(routeValue);const routeStyleId=cellStyleIds.get(sheet.name)?.get(XLSX.utils.encode_cell({r,c:range.s.c}))??0;currentGroupStyle=groupHeadingStyle(styleDefinitions[routeStyleId]||{});continue}}
+    if(groupColumn!==null){const rawGroup=effectiveCellValue(ws,r,groupColumn,anchors,covered,headerRow);if(rawGroup){const normalized=groupColumn===0&&sheet.name!=='ΠΑΡΑΓΓΕΛΙΕΣ'?formatDateText(rawGroup):rawGroup;if(normalized!==activeGroup){activeGroup=normalized;currentGroup=normalized;currentGroupStyle=''}}}
     const fields=[];let rowText='';let recordTitle='';const seen=new Set();
     for(let c=range.s.c;c<=range.e.c;c++){
       let sourceRow=r,sourceCol=c;const keyHere=`${r},${c}`;
@@ -191,7 +197,7 @@ function renderMobileCards(sheet,range,query,anchors,covered){
         seen.add(`${sourceRow},${sourceCol}`);
       }
       const address=XLSX.utils.encode_cell({r:sourceRow,c:sourceCol});const cell=ws[address]||{};
-      const value=String(dirty.get(`${sheet.name}!${address}`)?.value??cell.w??cell.v??'');if(!value.trim())continue;
+      const rawValue=dirty.get(`${sheet.name}!${address}`)?.value??cell.w??cell.v??'';const value=formatCellValue(cell,rawValue,headerForColumn(ws,headerRow,c));if(!String(value).trim())continue;
       const headerCell=ws[XLSX.utils.encode_cell({r:headerRow,c})];
       const header=String(headerCell?.w??headerCell?.v??'').trim()||XLSX.utils.encode_col(c);
       if(!recordTitle)recordTitle=value;
@@ -202,13 +208,19 @@ function renderMobileCards(sheet,range,query,anchors,covered){
       const hit=query&&rowText.toLocaleLowerCase('el').includes(query)?' search-match':'';
       fields.push(`<div class="mobile-field"><span class="mobile-label">${esc(header)}</span><div class="mobile-value edit-cell ${locked?'locked ':''}${changed?'changed':''}${hit}" ${editable?'contenteditable="true" spellcheck="false"':''} data-address="${address}" data-sheet="${esc(sheet.name)}" data-header="${esc(header)}" title="${locked?'Τύπος Excel — δεν επεξεργάζεται από την εφαρμογή':cell.l?.Tooltip|| (editable?'Πάτησε για επεξεργασία':'')}" style="${styleCss(style)}">${content}</div></div>`);
     }
-    if(fields.length&&(!query||rowText.toLocaleLowerCase('el').includes(query)))records.push(`<article class="mobile-record"><div class="mobile-record-title">${esc(recordTitle||`Γραμμή ${r+1}`)}</div>${fields.join('')}</article>`);
+    if(fields.length&&(!query||rowText.toLocaleLowerCase('el').includes(query))){const group=currentGroup?`<div class="mobile-group" style="${currentGroupStyle}">${esc(currentGroup)}</div>`:'';records.push(`${group}<article class="mobile-record"><div class="mobile-record-title">${esc(recordTitle||`Γραμμή ${r+1}`)}</div>${fields.join('')}</article>`);if(group)currentGroup=''}
   }
   area.className='mobile-records'+(editMode?' editing':'');
   area.innerHTML=records.join('')||'<div class="empty">Δεν βρέθηκαν γραμμές με περιεχόμενο.</div>';
   bindEditedCells();
   area.querySelectorAll('a').forEach(link=>link.addEventListener('click',event=>{if(editMode)event.preventDefault()}));
+  if(scrollToEnd)requestAnimationFrame(()=>area.lastElementChild?.scrollIntoView({block:'end'}));
 }
+function headerForColumn(ws,row,col){const cell=ws[XLSX.utils.encode_cell({r:row,c:col})];return String(cell?.w??cell?.v??'')}
+function groupHeadingStyle(style){const css=[];if(style.font?.color)css.push(`color:${style.font.color}`);else css.push('color:#c62828');css.push('font-weight:800');if(style.font?.size)css.push(`font-size:${Math.max(10,Math.min(22,style.font.size))}pt`);return css.join(';')}
+function effectiveCellValue(ws,row,col,anchors,covered,headerRow){let r=row,c=col;if(covered.has(`${row},${col}`)){const merge=mergesForCell(anchors,row,col);if(merge){r=merge.s.r;c=merge.s.c}}const cell=ws[XLSX.utils.encode_cell({r,c})];return String(formatCellValue(cell,cell?.v??cell?.w??'',headerForColumn(ws,headerRow,col))).trim()}
+function formatCellValue(cell,raw,header=''){if(raw==null||raw==='')return '';const isDate=XLSX.SSF?.is_date?.(cell?.z)||/ΗΜΕΡΟΜΗΝΙΑ|ΠΑΡΑΔΟΣΗ|ΟΛΟΚΛΗΡΩΣΗ/i.test(header);if(isDate&&typeof cell?.v==='number'&&(typeof raw==='number'||raw===cell.w||raw===cell.v)){const date=XLSX.SSF.parse_date_code(cell.v);if(date?.y&&date?.m&&date?.d)return`${String(date.d).padStart(2,'0')}/${String(date.m).padStart(2,'0')}/${date.y}`;}return formatDateText(String(raw))}
+function formatDateText(value){return String(value).replace(/(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})(?!\d)/g,(_,day,month,year)=>`${day.padStart(2,'0')}/${month.padStart(2,'0')}/${year.length===2?`20${year}`:year}`)}
 function mergesForCell(anchors,r,c){for(const merge of anchors.values())if(r>=merge.s.r&&r<=merge.e.r&&c>=merge.s.c&&c<=merge.e.c)return merge;return null}
 function bindEditedCells(){area.querySelectorAll('[contenteditable="true"]').forEach(cell=>cell.addEventListener('input',()=>{const key=`${cell.dataset.sheet}!${cell.dataset.address}`;dirty.set(key,{sheet:cell.dataset.sheet,address:cell.dataset.address,value:cell.textContent,header:cell.dataset.header});cell.classList.add('changed');saveButton.disabled=false}))}
 function renderControls(){editToggle.textContent=editMode?'✎ Τέλος επεξεργασίας':'✎ Επεξεργασία';saveButton.hidden=!editMode;cancelButton.hidden=!editMode;saveButton.disabled=dirty.size===0;editToggle.hidden=!remoteFile}
