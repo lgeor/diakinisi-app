@@ -114,7 +114,8 @@ async function readPresentation(bytes,workbook){
 }
 async function readThemeColors(zip){
   const file=zip.file('xl/theme/theme1.xml');if(!file)return[];const doc=xmlDoc(await file.async('string'));const dml='http://schemas.openxmlformats.org/drawingml/2006/main';const scheme=doc.getElementsByTagNameNS(dml,'clrScheme')[0];if(!scheme)return[];
-  return[...scheme.children].map(node=>{const color=node.firstElementChild;if(!color)return'';return color.getAttribute('lastClr')||color.getAttribute('val')||''});
+  const byName=new Map([...scheme.children].map(node=>[node.localName,node]));const order=['lt1','dk1','lt2','dk2','accent1','accent2','accent3','accent4','accent5','accent6','hlink','folHlink'];
+  return order.map(name=>{const color=byName.get(name)?.firstElementChild;if(!color)return'';return color.getAttribute('lastClr')||color.getAttribute('val')||''});
 }
 function parseCellStyles(source,themes){
   const doc=xmlDoc(source);const fonts=[...doc.getElementsByTagNameNS(NS,'fonts')[0]?.children||[]].map(node=>({name:childEl(node,'name')?.getAttribute('val'),size:Number(childEl(node,'sz')?.getAttribute('val'))||0,bold:!!childEl(node,'b'),italic:!!childEl(node,'i'),strike:!!childEl(node,'strike'),underline:!!childEl(node,'u'),color:excelColor(childEl(node,'color'),themes)}));
