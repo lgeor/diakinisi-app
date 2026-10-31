@@ -3,6 +3,7 @@ const tabs=document.getElementById('tabs');
 const area=document.getElementById('tableArea');
 const title=document.getElementById('sheetTitle');
 const search=document.getElementById('search');
+const layoutToggle=document.getElementById('layoutToggle');
 const editToggle=document.getElementById('editToggle');
 const saveButton=document.getElementById('saveChanges');
 const cancelButton=document.getElementById('cancelChanges');
@@ -33,6 +34,7 @@ let dirty=new Map();
 let styleDefinitions=[];
 let cellStyleIds=new Map();
 let themeColors=[];
+let mobileCards=true;
 
 document.getElementById('upload').onclick=()=>picker.click();
 picker.onchange=async event=>{
@@ -48,6 +50,7 @@ editToggle.onclick=()=>{if(editMode&&dirty.size){alert('Αποθήκευσε ή 
 cancelButton.onclick=()=>{dirty.clear();editMode=false;renderControls();showSheet(active)};
 saveButton.onclick=saveChanges;
 search.oninput=()=>{if(sheets[active])showSheet(active)};
+layoutToggle.onclick=()=>{mobileCards=!mobileCards;showSheet(active)};
 
 async function connectOneDrive(){
   if(!location.protocol.startsWith('http')){alert('Για σύνδεση OneDrive, η εφαρμογή πρέπει πρώτα να δημοσιευτεί σε ασφαλή διεύθυνση HTTPS.');return}
@@ -145,6 +148,9 @@ function showSheet(index){
   const ws=sheet.worksheet;const ref=ws['!ref']||'A1:A1';const range=XLSX.utils.decode_range(ref);const query=search.value.trim().toLocaleLowerCase('el');
   const merges=ws['!merges']||[];const anchors=new Map();const covered=new Set();
   for(const merge of merges){anchors.set(`${merge.s.r},${merge.s.c}`,merge);for(let r=merge.s.r;r<=merge.e.r;r++)for(let c=merge.s.c;c<=merge.e.c;c++)if(r!==merge.s.r||c!==merge.s.c)covered.add(`${r},${c}`)}
+  const mobile=window.matchMedia('(max-width:740px)').matches;
+  layoutToggle.hidden=!mobile;layoutToggle.textContent=mobileCards?'▦ Προβολή Excel':'▤ Κάρτες';
+  if(mobile&&mobileCards){renderMobileCards(sheet,range,query,anchors,covered);return}
   const rowHasMatch=new Set();
   if(query)for(let r=range.s.r;r<=range.e.r;r++)for(let c=range.s.c;c<=range.e.c;c++){const cell=ws[XLSX.utils.encode_cell({r,c})];if(String(cell?.w??cell?.v??'').toLocaleLowerCase('el').includes(query))rowHasMatch.add(r)}
   const colNodes=[];for(let c=range.s.c;c<=range.e.c;c++){const column=ws['!cols']?.[c];const width=column?.wpx|| (column?.wch?column.wch*7+5:112);colNodes.push(`<col style="width:${Math.max(28,Math.min(500,width))}px">`)}
@@ -171,6 +177,40 @@ function showSheet(index){
   area.querySelectorAll('a').forEach(link=>link.addEventListener('click',event=>{if(editMode)event.preventDefault()}));
   if(query&&rowHasMatch.size)area.querySelector('.search-match')?.scrollIntoView({block:'nearest',inline:'nearest'});
 }
+function renderMobileCards(sheet,range,query,anchors,covered){
+  const ws=sheet.worksheet;const headerRow=range.s.r;const records=[];
+  for(let r=headerRow+1;r<=range.e.r;r++){
+    if(ws['!rows']?.[r]?.hidden)continue;
+    const fields=[];let rowText='';let recordTitle='';const seen=new Set();
+    for(let c=range.s.c;c<=range.e.c;c++){
+      let sourceRow=r,sourceCol=c;const keyHere=`${r},${c}`;
+      if(covered.has(keyHere)){
+        const merge=mergesForCell(anchors,r,c);if(!merge)continue;
+        sourceRow=merge.s.r;sourceCol=merge.s.c;
+        if(sourceRow!==r||seen.has(`${sourceRow},${sourceCol}`))continue;
+        seen.add(`${sourceRow},${sourceCol}`);
+      }
+      const address=XLSX.utils.encode_cell({r:sourceRow,c:sourceCol});const cell=ws[address]||{};
+      const value=String(dirty.get(`${sheet.name}!${address}`)?.value??cell.w??cell.v??'');if(!value.trim())continue;
+      const headerCell=ws[XLSX.utils.encode_cell({r:headerRow,c})];
+      const header=String(headerCell?.w??headerCell?.v??'').trim()||XLSX.utils.encode_col(c);
+      if(!recordTitle)recordTitle=value;
+      rowText+=` ${header} ${value}`;
+      const styleId=cellStyleIds.get(sheet.name)?.get(address)??0;const style=styleDefinitions[styleId]||styleDefinitions[0]||{};
+      const locked=sheet.formulaCells.has(address);const editable=editMode&&!locked&&sourceRow===r;const changed=dirty.has(`${sheet.name}!${address}`);
+      const content=cell.l?.Target?hyperlinkMarkup(cell.l,value):esc(value);
+      const hit=query&&rowText.toLocaleLowerCase('el').includes(query)?' search-match':'';
+      fields.push(`<div class="mobile-field"><span class="mobile-label">${esc(header)}</span><div class="mobile-value edit-cell ${locked?'locked ':''}${changed?'changed':''}${hit}" ${editable?'contenteditable="true" spellcheck="false"':''} data-address="${address}" data-sheet="${esc(sheet.name)}" data-header="${esc(header)}" title="${locked?'Τύπος Excel — δεν επεξεργάζεται από την εφαρμογή':cell.l?.Tooltip|| (editable?'Πάτησε για επεξεργασία':'')}" style="${styleCss(style)}">${content}</div></div>`);
+    }
+    if(fields.length&&(!query||rowText.toLocaleLowerCase('el').includes(query)))records.push(`<article class="mobile-record"><div class="mobile-record-title">${esc(recordTitle||`Γραμμή ${r+1}`)}</div>${fields.join('')}</article>`);
+  }
+  area.className='mobile-records'+(editMode?' editing':'');
+  area.innerHTML=records.join('')||'<div class="empty">Δεν βρέθηκαν γραμμές με περιεχόμενο.</div>';
+  bindEditedCells();
+  area.querySelectorAll('a').forEach(link=>link.addEventListener('click',event=>{if(editMode)event.preventDefault()}));
+}
+function mergesForCell(anchors,r,c){for(const merge of anchors.values())if(r>=merge.s.r&&r<=merge.e.r&&c>=merge.s.c&&c<=merge.e.c)return merge;return null}
+function bindEditedCells(){area.querySelectorAll('[contenteditable="true"]').forEach(cell=>cell.addEventListener('input',()=>{const key=`${cell.dataset.sheet}!${cell.dataset.address}`;dirty.set(key,{sheet:cell.dataset.sheet,address:cell.dataset.address,value:cell.textContent,header:cell.dataset.header});cell.classList.add('changed');saveButton.disabled=false}))}
 function renderControls(){editToggle.textContent=editMode?'✎ Τέλος επεξεργασίας':'✎ Επεξεργασία';saveButton.hidden=!editMode;cancelButton.hidden=!editMode;saveButton.disabled=dirty.size===0;editToggle.hidden=!remoteFile}
 
 async function saveChanges(){
