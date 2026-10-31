@@ -30,6 +30,9 @@ let remoteFile=null;
 let originalBytes=null;
 let editMode=false;
 let dirty=new Map();
+let styleDefinitions=[];
+let cellStyleIds=new Map();
+let themeColors=[];
 
 document.getElementById('upload').onclick=()=>picker.click();
 picker.onchange=async event=>{
@@ -90,8 +93,10 @@ async function graphFetch(url,token,options={}){return fetch(url,{...options,hea
 async function graphJson(url,token,options={}){const response=await graphFetch(url,token,options);if(!response.ok)throw new Error(`Η Microsoft απάντησε με σφάλμα ${response.status}: ${await response.text()}`);return response.json()}
 
 async function loadBytes(bytes,name){
-  const workbook=XLSX.read(bytes,{type:'array',cellDates:false});
-  sheets=workbook.SheetNames.map(sheetName=>({name:sheetName,rows:XLSX.utils.sheet_to_json(workbook.Sheets[sheetName],{header:1,defval:'',blankrows:true}),formulaCells:findFormulaCells(workbook.Sheets[sheetName])}));
+  const workbook=XLSX.read(bytes,{type:'array',cellDates:false,cellStyles:true,cellHTML:true});
+  const presentation=await readPresentation(bytes,workbook);
+  styleDefinitions=presentation.styles;cellStyleIds=presentation.cellStyles;themeColors=presentation.themeColors;
+  sheets=workbook.SheetNames.map(sheetName=>({name:sheetName,worksheet:workbook.Sheets[sheetName],rows:XLSX.utils.sheet_to_json(workbook.Sheets[sheetName],{header:1,defval:'',blankrows:true}),formulaCells:findFormulaCells(workbook.Sheets[sheetName])}));
   document.getElementById('filename').textContent=name;
   document.getElementById('filehint').textContent=`${sheets.length} φύλλα εργασίας · ${Math.round(bytes.byteLength/1024)} KB`;
   document.getElementById('status').textContent=remoteFile?'Συνδεδεμένο με OneDrive':'Αρχείο φορτώθηκε';
@@ -100,28 +105,72 @@ async function loadBytes(bytes,name){
   search.hidden=false;renderTabs();showSheet(0);renderControls();
 }
 function findFormulaCells(sheet){const result=new Set();for(const [address,cell] of Object.entries(sheet)){if(address[0]==='!')continue;if(cell?.f)result.add(address)}return result}
+async function readPresentation(bytes,workbook){
+  let zip;try{zip=await JSZip.loadAsync(bytes)}catch{return{styles:[],cellStyles:new Map(),themeColors:[]}}
+  const themeColors=await readThemeColors(zip);const stylesFile=zip.file('xl/styles.xml');const styles=stylesFile?parseCellStyles(await stylesFile.async('string'),themeColors):[];const cellStyles=new Map();
+  const paths=await getSheetPaths(zip);
+  for(const [name,path] of paths){const file=zip.file(path);if(!file)continue;const doc=xmlDoc(await file.async('string'));const ids=new Map();for(const cell of doc.getElementsByTagNameNS(NS,'c')){const id=cell.getAttribute('s');if(id)ids.set(cell.getAttribute('r'),Number(id))}cellStyles.set(name,ids)}
+  return{styles,cellStyles,themeColors};
+}
+async function readThemeColors(zip){
+  const file=zip.file('xl/theme/theme1.xml');if(!file)return[];const doc=xmlDoc(await file.async('string'));const dml='http://schemas.openxmlformats.org/drawingml/2006/main';const scheme=doc.getElementsByTagNameNS(dml,'clrScheme')[0];if(!scheme)return[];
+  return[...scheme.children].map(node=>{const color=node.firstElementChild;if(!color)return'';return color.getAttribute('lastClr')||color.getAttribute('val')||''});
+}
+function parseCellStyles(source,themes){
+  const doc=xmlDoc(source);const fonts=[...doc.getElementsByTagNameNS(NS,'fonts')[0]?.children||[]].map(node=>({name:childEl(node,'name')?.getAttribute('val'),size:Number(childEl(node,'sz')?.getAttribute('val'))||0,bold:!!childEl(node,'b'),italic:!!childEl(node,'i'),strike:!!childEl(node,'strike'),underline:!!childEl(node,'u'),color:excelColor(childEl(node,'color'),themes)}));
+  const fills=[...doc.getElementsByTagNameNS(NS,'fills')[0]?.children||[]].map(node=>{const pattern=childEl(node,'patternFill');return{pattern:pattern?.getAttribute('patternType'),color:excelColor(childEl(pattern,'fgColor'),themes)}});
+  const borders=[...doc.getElementsByTagNameNS(NS,'borders')[0]?.children||[]].map(node=>{const sides={};for(const side of ['left','right','top','bottom']){const edge=childEl(node,side);sides[side]={style:edge?.getAttribute('style')||'',color:excelColor(childEl(edge,'color'),themes)}}return sides});
+  const xfs=doc.getElementsByTagNameNS(NS,'cellXfs')[0];if(!xfs)return[];
+  return[...xfs.children].map(xf=>{const alignment=childEl(xf,'alignment');return{font:fonts[Number(xf.getAttribute('fontId'))]||{},fill:fills[Number(xf.getAttribute('fillId'))]||{},border:borders[Number(xf.getAttribute('borderId'))]||{},alignment:alignment?Object.fromEntries([...alignment.attributes].map(a=>[a.name,a.value])):{}}});
+}
+function childEl(node,name){return node?[...node.children].find(child=>child.localName===name):null}
+function excelColor(node,themes){if(!node)return'';const rgb=node.getAttribute('rgb');if(rgb&&/^[0-9A-Fa-f]{6,8}$/.test(rgb))return`#${rgb.slice(-6)}`;const theme=node.getAttribute('theme');if(theme!==null){const color=themes[Number(theme)];return color&&/^[0-9A-Fa-f]{6}$/.test(color)?`#${color}`:''}return''}
+function styleCss(style){
+  const css=[];const font=style.font||{};const fill=style.fill||{};const align=style.alignment||{};const border=style.border||{};
+  if(font.color)css.push(`color:${font.color}`);if(font.bold)css.push('font-weight:700');if(font.italic)css.push('font-style:italic');if(font.strike)css.push('text-decoration:line-through');else if(font.underline)css.push('text-decoration:underline');
+  if(font.name){const family=font.name.replace(/[^\w ,.-]/g,'');if(family)css.push(`font-family:${family}`)}if(font.size)css.push(`font-size:${Math.max(7,Math.min(48,font.size))}pt`);
+  if(fill.pattern==='solid'&&fill.color)css.push(`background-color:${fill.color}`);
+  const horizontal={left:'left',center:'center',right:'right',justify:'justify',distributed:'justify',centerContinuous:'center'}[align.horizontal];if(horizontal)css.push(`text-align:${horizontal}`);
+  const vertical={top:'top',center:'middle',bottom:'bottom',justify:'middle',distributed:'middle'}[align.vertical];if(vertical)css.push(`vertical-align:${vertical}`);
+  if(align.wrapText==='1')css.push('white-space:pre-wrap');if(align.textRotation==='90')css.push('writing-mode:vertical-rl');if(Number(align.indent)>0)css.push(`padding-left:${Math.min(32,Number(align.indent)*8)}px`);
+  for(const side of ['top','right','bottom','left']){const edge=border[side];const cssBorder=excelBorder(edge);if(cssBorder)css.push(`border-${side}:${cssBorder}`)}
+  return css.join(';');
+}
+function excelBorder(edge){if(!edge?.style)return'';const map={hair:'1px solid',thin:'1px solid',dotted:'1px dotted',dashed:'1px dashed',dashDot:'1px dashed',dashDotDot:'1px dashed',medium:'2px solid',mediumDashed:'2px dashed',mediumDashDot:'2px dashed',mediumDashDotDot:'2px dashed',thick:'3px solid',double:'3px double'};const result=map[edge.style];return result?`${result}${edge.color?` ${edge.color}`:''}`:''}
+function hyperlinkMarkup(link,text){const target=String(link.Target||'').trim();if(!/^https?:\/\/|^mailto:/i.test(target))return esc(text);return`<a href="${esc(target)}" rel="noopener noreferrer" target="_blank"${link.Tooltip?` title="${esc(link.Tooltip)}"`:''}>${esc(text)}</a>`}
 function renderTabs(){tabs.innerHTML='<div class="sidehead">Φύλλα εργασίας</div>'+sheets.map((sheet,index)=>`<button class="cat ${index===active?'active':''}" data-i="${index}" title="${esc(descriptions[sheet.name]||sheet.name)}"><span class="mini">▤</span>${esc(sheet.name)}<span class="badge">${Math.max(0,sheet.rows.length-1)}</span></button>`).join('');tabs.querySelectorAll('.cat').forEach(button=>button.onclick=()=>showSheet(+button.dataset.i))}
 function showSheet(index){
   active=index;renderTabs();const sheet=sheets[index];if(!sheet)return;title.textContent=sheet.name;
-  const allRows=sheet.rows.map((row,rowIndex)=>({row,rowIndex})).filter(item=>item.row.some(value=>String(value).trim()!==''));
-  if(!allRows.length){area.className='empty';area.innerHTML='<strong>Αυτό το φύλλο είναι κενό</strong>';return}
-  const headers=(allRows.find(item=>item.rowIndex===0)?.row||[]).map((value,col)=>String(value||`Στήλη ${col+1}`));
-  const query=search.value.toLocaleLowerCase('el');
-  const body=allRows.filter(item=>item.rowIndex>0).filter(item=>!query||item.row.some(value=>String(value).toLocaleLowerCase('el').includes(query)));
-  area.className='tablewrap'+(editMode?' editing':'');
-  area.innerHTML=`<table><thead><tr>${headers.map(header=>`<th>${esc(header)}</th>`).join('')}</tr></thead><tbody>${body.map(({row,rowIndex})=>`<tr>${headers.map((header,col)=>{
-    const address=XLSX.utils.encode_cell({r:rowIndex,c:col});const locked=sheet.formulaCells.has(address);const key=`${sheet.name}!${address}`;const val=formatCell(dirty.get(key)?.value??row[col]??'',header);
-    const editable=editMode&&!locked;
-    const isChanged=dirty.has(key);
-    return `<td class="edit-cell ${locked?'locked ':''}${isChanged?'changed':''}" ${editable?'contenteditable="true" spellcheck="false"':''} data-address="${address}" data-sheet="${esc(sheet.name)}" data-header="${esc(header)}" title="${locked?'Τύπος Excel — δεν επεξεργάζεται από την εφαρμογή':editable?'Πάτησε για επεξεργασία':''}">${esc(val)}</td>`;
-  }).join('')}</tr>`).join('')}</tbody></table>`;
-  if(body.length===0)area.innerHTML='<div class="empty">Δεν βρέθηκαν αποτελέσματα.</div>';
-  area.querySelectorAll('[contenteditable="true"]').forEach(cell=>{
-    cell.addEventListener('input',()=>{const key=`${cell.dataset.sheet}!${cell.dataset.address}`;dirty.set(key,{sheet:cell.dataset.sheet,address:cell.dataset.address,value:cell.textContent,header:cell.dataset.header});cell.classList.add('changed');saveButton.disabled=false});
-  });
+  const ws=sheet.worksheet;const ref=ws['!ref']||'A1:A1';const range=XLSX.utils.decode_range(ref);const query=search.value.trim().toLocaleLowerCase('el');
+  const merges=ws['!merges']||[];const anchors=new Map();const covered=new Set();
+  for(const merge of merges){anchors.set(`${merge.s.r},${merge.s.c}`,merge);for(let r=merge.s.r;r<=merge.e.r;r++)for(let c=merge.s.c;c<=merge.e.c;c++)if(r!==merge.s.r||c!==merge.s.c)covered.add(`${r},${c}`)}
+  const rowHasMatch=new Set();
+  if(query)for(let r=range.s.r;r<=range.e.r;r++)for(let c=range.s.c;c<=range.e.c;c++){const cell=ws[XLSX.utils.encode_cell({r,c})];if(String(cell?.w??cell?.v??'').toLocaleLowerCase('el').includes(query))rowHasMatch.add(r)}
+  const colNodes=[];for(let c=range.s.c;c<=range.e.c;c++){const column=ws['!cols']?.[c];const width=column?.wpx|| (column?.wch?column.wch*7+5:112);colNodes.push(`<col style="width:${Math.max(28,Math.min(500,width))}px">`)}
+  const rows=[];
+  for(let r=range.s.r;r<=range.e.r;r++){
+    const rowMeta=ws['!rows']?.[r];if(rowMeta?.hidden)continue;
+    const rowHeight=rowMeta?.hpx?` style="height:${rowMeta.hpx}px"`:rowMeta?.hpt?` style="height:${rowMeta.hpt*4/3}px"`:'';
+    const cells=[];
+    for(let c=range.s.c;c<=range.e.c;c++){
+      if(covered.has(`${r},${c}`))continue;
+      const address=XLSX.utils.encode_cell({r,c});const key=`${sheet.name}!${address}`;const cell=ws[address]||{};const merge=anchors.get(`${r},${c}`);const span=merge?` colspan="${merge.e.c-merge.s.c+1}" rowspan="${merge.e.r-merge.s.r+1}"`:'';
+      const styleId=cellStyleIds.get(sheet.name)?.get(address)??0;const style=styleDefinitions[styleId]||styleDefinitions[0]||{};const locked=sheet.formulaCells.has(address);const editable=editMode&&!locked;const changed=dirty.has(key);
+      const raw=dirty.get(key)?.value??cell.w??cell.v??'';const display=String(raw);const headerCell=ws[XLSX.utils.encode_cell({r:range.s.r,c})];const header=String(headerCell?.w??headerCell?.v??'');
+      const valueMarkup=cell.l?.Target?hyperlinkMarkup(cell.l,display):esc(display);
+      const hit=query&&rowHasMatch.has(r)?' search-match':'';
+      const titleText=locked?'Τύπος Excel — δεν επεξεργάζεται από την εφαρμογή':cell.l?.Tooltip|| (editable?'Πάτησε για επεξεργασία':'');
+      cells.push(`<td class="edit-cell ${locked?'locked ':''}${changed?'changed':''}${hit}" ${span} ${editable?'contenteditable="true" spellcheck="false"':''} data-address="${address}" data-sheet="${esc(sheet.name)}" data-header="${esc(header)}" title="${esc(titleText)}" style="${styleCss(style)}">${valueMarkup}</td>`);
+    }
+    rows.push(`<tr${rowHeight}>${cells.join('')}</tr>`);
+  }
+  area.className='tablewrap excel-grid'+(editMode?' editing':'');
+  area.innerHTML=`<table><colgroup>${colNodes.join('')}</colgroup><tbody>${rows.join('')}</tbody></table>`;
+  area.querySelectorAll('[contenteditable="true"]').forEach(cell=>cell.addEventListener('input',()=>{const key=`${cell.dataset.sheet}!${cell.dataset.address}`;dirty.set(key,{sheet:cell.dataset.sheet,address:cell.dataset.address,value:cell.textContent,header:cell.dataset.header});cell.classList.add('changed');saveButton.disabled=false}));
+  area.querySelectorAll('a').forEach(link=>link.addEventListener('click',event=>{if(editMode)event.preventDefault()}));
+  if(query&&rowHasMatch.size)area.querySelector('.search-match')?.scrollIntoView({block:'nearest',inline:'nearest'});
 }
 function renderControls(){editToggle.textContent=editMode?'✎ Τέλος επεξεργασίας':'✎ Επεξεργασία';saveButton.hidden=!editMode;cancelButton.hidden=!editMode;saveButton.disabled=dirty.size===0;editToggle.hidden=!remoteFile}
-function formatCell(value,header){if(typeof value==='number'&&value>20000&&value<80000&&/ΗΜΕΡΟΜΗΝΙΑ|ΠΑΡΑΔΟΣΗ|ΟΛΟΚΛΗΡΩΣΗ/i.test(header)){return new Intl.DateTimeFormat('el-GR').format(new Date(Date.UTC(1899,11,30)+value*86400000))}return value}
 
 async function saveChanges(){
   if(!remoteFile||dirty.size===0)return;
